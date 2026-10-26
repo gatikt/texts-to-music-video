@@ -1,0 +1,29 @@
+# dependencies / environments
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# projects hold private messages, photos and research: never commit them (only the demo)
+projects/*
+!projects/demo/
+projects/demo/out/
+projects/demo/**/frames*/
+
+# render output and scratch
+**/out/
+**/frames*/
+**/previews/
+**/photos/
+
+# message databases (the demo ships a small synthetic one)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+!projects/demo/data/dms.db
+
+# local secrets
+.env
+.env.*

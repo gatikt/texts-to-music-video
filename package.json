@@ -1,0 +1,13 @@
+{
+  "name": "texts-to-music-video",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Turn real text messages into a personalized song and a hand-painted vertical music video.",
+  "license": "UNLICENSED",
+  "bin": { "t2mv": "bin/t2mv" },
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "doctor": "node bin/t2mv doctor",
+    "check": "node --check bin/t2mv && node scripts/check_workflows.mjs"
+  }
+}

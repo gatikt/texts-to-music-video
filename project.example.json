@@ -1,0 +1,69 @@
+{
+  "name": "my-story",
+  "title": "Working Title",
+
+  "me": "Alex",
+  "me_aliases": ["Alex Example"],
+  "display_name": "Alex",
+  "timezone": "UTC",
+
+  "data": {
+    "instagram_export": "~/Downloads/instagram-export",
+    "instagram_export_utc_offset": 0,
+    "imessage": true,
+    "chat_db": "~/Library/Messages/chat.db",
+    "dms_db": "data/dms.db"
+  },
+
+  "audience": "Alex and close friends. Nothing gets published.",
+  "tone": "funny, humble, tough: undercut every win with the embarrassing true detail; credit the people around you",
+  "brief": "A song and hand-painted vertical music video about the last few years of Alex's life, told through real texts. Capture the true context of each lyric, the right setting for every scene (which room, which school, which city), and the right looks for every person (build, hair, what they wore at that age).",
+
+  "eras": [
+    ["era_1", "2021-01-01", "2022-01-01", "Era 1: chapter one"],
+    ["era_2", "2022-01-01", "2023-01-01", "Era 2"],
+    ["era_3", "2023-01-01", "2024-01-01", "Era 3: a big change"],
+    ["era_4", "2024-01-01", "2025-01-01", "Era 4: where things are now"]
+  ],
+  "extra_research": [
+    ["family", "FAMILY across all years: parent and sibling threads (find them by volume). The warm, funny, proud moments; how the relationship changes."],
+    ["stats", "NUMBERS for the whole history, computed with SQL and double-checked: messages sent vs received, per year, busiest day ever and what happened, top people per year, late-night share, most-used words and emoji by year, fun superlatives."]
+  ],
+
+  "song": {
+    "style": "upbeat feel-good pop anthem, stomp-clap beat, bright synths, warm lead vocal, playful, gang vocal chants, call and response, singalong chorus, 118 bpm, half-time bridge, final chorus key change",
+    "target_length": "3:00-3:40",
+    "lyric_angles": [
+      "ANGLE A - anthem: a big feel-good singalong; the chorus is a real catchphrase or number from the texts.",
+      "ANGLE B - the scroll: the song IS scrolling up through years of messages from today back to the first text; each verse is an era.",
+      "ANGLE C - the people: each verse is a circle of people and the chorus is about who was always there at two A.M."
+    ],
+    "revision_feedback": "",
+    "revision_hooks": [],
+    "suno_url": "",
+    "trim_end": null,
+    "fade_out": 2.2
+  },
+
+  "lyric_sections": [
+    ["ctx_01_intro_verse1", "0-40 s, lines 0-11: <what the lines are about>"],
+    ["ctx_02_choruses", "all choruses: <the hook and where it comes from>"]
+  ],
+
+  "looks_people": "the protagonist at each age shown, parents, siblings, the 4-6 core friends by volume, anyone the lyrics mention",
+  "settings_places": "home (rooms, kitchen, outside), school(s) or work, anywhere else the lyrics go",
+
+  "chapters": [
+    ["c01_intro", 0, 24.8],
+    ["c02_verse1", 24.8, 40.5]
+  ],
+  "review_slices": null,
+  "story_start_date": "2021-01-01",
+
+  "video": {
+    "fps": 30,
+    "workers": 4,
+    "out_name": "my-story.mp4",
+    "share_crf": 24
+  }
+}

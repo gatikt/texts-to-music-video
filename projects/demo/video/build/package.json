@@ -1,0 +1,14 @@
+{
+  "name": "demo-video",
+  "private": true,
+  "type": "module",
+  "description": "Demo project build folder. `npm install` also copies the shared engine in (engine/sync.mjs).",
+  "scripts": {
+    "postinstall": "node ../../../../engine/sync.mjs .",
+    "sync": "node ../../../../engine/sync.mjs .",
+    "check": "node tools/checkquotes.mjs",
+    "frames": "node render.mjs --frames=0:30 --workers=4",
+    "encode": "node render.mjs --encode --out=out/demo.mp4"
+  },
+  "dependencies": { "p5": "^2.3.3", "p5.brush": "^2.2.3", "puppeteer-core": "^25.11.0" }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "t2mv-suno",
+  "private": true,
+  "type": "module",
+  "description": "Drive the Suno web UI (create songs, fetch takes) with Playwright and the locally installed Chrome.",
+  "bin": { "t2mv-suno": "./suno.mjs" },
+  "scripts": {
+    "login": "node suno.mjs login",
+    "create": "node suno.mjs create",
+    "fetch": "node suno.mjs fetch",
+    "check": "node --check suno.mjs && node --check selectors.mjs && node --check lib.mjs",
+    "test": "node test/run-tests.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": { "playwright-core": "1.64.0" }
+}

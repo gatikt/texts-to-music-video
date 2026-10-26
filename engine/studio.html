@@ -1,0 +1,31 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Music Video Studio</title>
+<style>
+@font-face{font-family:"Permanent Marker";src:url(assets/fonts/PermanentMarker-Regular.ttf)}
+@font-face{font-family:"Shantell Sans";src:url(assets/fonts/ShantellSans.ttf);font-weight:300 800}
+@font-face{font-family:"Caveat";src:url(assets/fonts/Caveat.ttf);font-weight:400 700}
+html,body{margin:0;background:#1b1820;color:#eee;font:13px system-ui,sans-serif}
+main{padding:12px;display:grid;gap:8px;justify-items:start}
+#out{height:86vh;aspect-ratio:9/16;background:#F4ECDD}
+.p5Canvas{display:none!important}
+.bar{display:flex;gap:10px;align-items:center;width:min(100%,900px)} #scrub{flex:1} #tt{min-width:150px;font-variant-numeric:tabular-nums}
+</style>
+<script src="node_modules/p5/lib/p5.min.js"></script>
+<script src="node_modules/p5.brush/dist/p5.brush.js"></script>
+</head><body><main>
+<canvas id="out" width="1080" height="1920"></canvas>
+<div class="bar"><input id="scrub" type="range" min="0" max="60" step="0.0333" value="0"><span id="tt">loading…</span></div>
+</main>
+<!-- project data: src/timeline_data.js (scripts/make_timeline.py) and src/project_files.js (tools/assets.mjs, run by render.mjs) -->
+<script src="src/timeline_data.js"></script>
+<script src="src/project_files.js"></script>
+<script>document.getElementById('scrub').max = TL.duration;</script>
+<!-- shared engine -->
+<script src="src/core.js"></script>
+<script src="src/frame.js"></script>
+<script src="src/cast.js"></script>
+<script src="src/props.js"></script>
+<!-- project scripts: src/msg_data.js, src/story.js, then every src/ch/*.js in name order -->
+<script>for (const s of (window.PROJECT_SCRIPTS || [])) document.write('<script src="' + s + '"><\/script>');</script>
+<script>{const lab=new URLSearchParams(location.search).get('lab'); if(lab) document.write('<script src="src/lab/'+lab+'.js"><\/script>');}</script>
+</body></html>

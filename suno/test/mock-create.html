@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mock create page</title>
+<!--
+  Offline stand-in for the Suno create page, used only by suno/test/run-tests.mjs.
+  It reproduces the parts suno.mjs depends on (roles, accessible names, a
+  contenteditable lyrics box, a style box whose placeholder is a random list,
+  the "Create song" button and the /generate + feed network calls).
+  It spends nothing and talks only to the local test server.
+-->
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 24px; background: #111; color: #eee; }
+  [contenteditable] { min-height: 120px; border: 1px solid #555; padding: 8px; }
+  textarea, input { width: 420px; background: #222; color: #eee; border: 1px solid #555; }
+  .row { display: flex; gap: 8px; align-items: flex-start; margin: 12px 0; }
+  #advanced[hidden] { display: none; }
+</style>
+</head>
+<body>
+  <nav><a href="/library">Library</a></nav>
+  <div role="tablist">
+    <button role="tab" aria-selected="true">Songs</button>
+    <button role="tab" aria-selected="false">Sounds</button>
+  </div>
+  <div role="tablist">
+    <button role="tab" id="simpleTab" aria-selected="true">Simple</button>
+    <button role="tab" id="advTab" aria-selected="false">Advanced</button>
+  </div>
+
+  <section id="advanced" hidden>
+    <div class="row">
+      <div id="lyrics" role="textbox" aria-multiline="true" aria-label="Lyrics editor" contenteditable="true"></div>
+    </div>
+    <div class="row">
+      <div>
+        <textarea id="style" rows="3"></textarea>
+        <div>
+          <button type="button">View saved style prompts</button>
+          <button type="button">Personalize style prompt to match your taste</button>
+        </div>
+      </div>
+    </div>
+    <div class="row"><input id="title" placeholder="Song Title (Optional)"></div>
+  </section>
+
+  <button id="create" type="button">Create song</button>
+  <ul id="clips"><li><a href="/song/11111111-2222-4333-8444-555555555555">older song</a></li></ul>
+
+<script>
+  const examples = ['drum solo', 'dark j-pop', 'happycore', 'sea shanty', 'lofi house', 'polka', 'math rock', 'bossa nova'];
+  const pick = () => examples.slice().sort(() => Math.random() - 0.5).slice(0, 4).join(', ');
+  document.getElementById('style').placeholder = pick();
+
+  const adv = document.getElementById('advanced');
+  document.getElementById('advTab').onclick = () => { adv.hidden = false; };
+  document.getElementById('simpleTab').onclick = () => { adv.hidden = true; };
+
+  document.getElementById('create').onclick = async () => {
+    const body = {
+      prompt: document.getElementById('lyrics').innerText,
+      tags: document.getElementById('style').value,
+      title: document.getElementById('title').value,
+    };
+    const r = await fetch('/api/generate/v2/', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json();
+    const ul = document.getElementById('clips');
+    for (const c of j.clips) {
+      const li = document.createElement('li');
+      li.innerHTML = `<a href="/song/${c.id}">${c.title}</a>`;
+      ul.prepend(li);
+    }
+    const ids = j.clips.map((c) => c.id).join(',');
+    const poll = async () => {
+      const f = await (await fetch('/api/feed/v2?ids=' + ids)).json();
+      if (f.clips.some((c) => c.status !== 'complete')) setTimeout(poll, 1000);
+    };
+    setTimeout(poll, 500);
+  };
+</script>
+</body>
+</html>

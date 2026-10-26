@@ -1,0 +1,19 @@
+# copied in from engine/ by `npm install` (engine/sync.mjs) — edit them in engine/, not here
+/render.mjs
+/studio.html
+/GUIDE.md
+/src/core.js
+/src/frame.js
+/src/cast.js
+/src/props.js
+/src/lab/*
+!/src/lab/p_*.js
+/tools/
+/assets/fonts/
+/.engine-sync.json
+/.engine-sync-backup/
+# generated / heavy
+/src/project_files.js
+/node_modules/
+/out/
+/previews/

@@ -1,0 +1,574 @@
+#!/usr/bin/env node
+// t2mv: texts -> song -> music video. One orchestrator for the whole pipeline.
+// Plain Node (>= 20), no dependencies. Every stage works on projects/<name>/, configured by projects/<name>/project.json.
+'use strict';
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync } = require('child_process');
+
+const REPO = path.resolve(__dirname, '..');
+const PROJECTS = path.resolve(process.env.T2MV_PROJECTS || path.join(REPO, 'projects'));
+const ENGINE = path.join(REPO, 'engine');
+const SCRIPTS = path.join(REPO, 'scripts');
+const VENV_PY = path.join(REPO, '.venv', 'bin', 'python');
+const CHROME = process.env.CHROME_PATH || process.env.T2MV_CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+
+const WORKFLOWS = {
+  'suno-browser': { file: '0_suno_browser.js', what: 'generate the song in Suno via Claude in Chrome (asks you before Create)' },
+  research: { file: '1_song_lyrics.js', what: 'research eras -> story arc -> 3 lyric drafts -> judge' },
+  lyrics: { file: '1b_song_revision.js', what: 'revise the song from your feedback: hook drafts -> judge -> cringe critics -> fix' },
+  preproduction: { file: '2_preproduction.js', what: 'context dossiers, fact-checks, LOOKS/SETTINGS bibles, cast/sets/HUD builders, director storyboard' },
+  chapters: { file: '3_chapters_review_fix.js', what: 'build -> critique -> polish every chapter, whole-film review, verified fixes' },
+  review: { file: '4_continuity_review.js', what: 'standalone whole-film continuity review with adversarial verify' },
+  fixes: { file: '5_apply_review_fixes.js', what: 'apply verified findings per chapter file, then re-check each' },
+};
+
+const HELP = `t2mv - turn real text messages into a song and a hand-painted vertical music video
+
+usage: bin/t2mv <command> [project] [options]
+
+setup
+  doctor                         check node, ffmpeg, python, .venv, Chrome, Full Disk Access; print fixes
+  init <name>                    create projects/<name>/ with a project.json from project.example.json
+  status <name>                  show which pipeline artifacts exist
+
+pipeline (in order)
+  db <name>                      Instagram export -> ig_clean.json, + iMessage -> projects/<name>/data/dms.db
+  research <name>                print the Claude Code prompt for the research + lyrics workflow
+  lyrics <name>                  print the prompt for the lyric revision workflow (set song.revision_feedback first)
+  suno <name> login|create|fetch run suno/suno.mjs: sign in / make the song (spends credits; --dry-run) / download it
+  audio <name>                   fade/cut song.wav -> song_cut.wav, beats + transcript, aligned lyrics
+  timeline <name>                set up video/build (npm install syncs the engine in), write timing + chapters
+  preproduction <name>           print the prompt for the pre-production workflow
+  chapters <name>                print the prompt for the chapters/review/fix workflow
+  review <name> | fixes <name>   print prompts for the standalone review / fix workflows
+  render <name>                  checkquotes, render all frames (retry loop), encode, verify, share copy
+  clean <name> [--yes]           delete re-creatable bulk (frames, previews, node_modules, raw audio)
+
+other
+  workflow <name> <stage>        print the prompt for any workflow: ${Object.keys(WORKFLOWS).join(', ')}
+  help                           this text
+
+options
+  --fresh            render: delete existing frames first (do this after ANY code change; frames are reused)
+  --tries=N          render: frame-render attempts before giving up (default 4)
+  --workers=N --fps=N  render: override project.json video settings
+  --skip-checkquotes render: do not run tools/checkquotes.mjs first
+  --skip-analyze     audio: only cut + align (reuse beats.json / transcript.json)
+  --model=NAME       audio: faster-whisper model (default song.whisper_model or medium.en; tiny.en for a quick test)
+  --refresh-engine   timeline: re-run engine/sync.mjs into build/ (updates engine-owned files; skips any edited
+                     inside build/ unless you run node engine/sync.mjs <build> --force; never touches project-owned
+                     files: src/ch/, story.js, cast_project.js, props_project.js, hud.js, assets/*.png)
+  --items=FILE       fixes: JSON file with the findings items to pass as args.items
+  --yes              clean: actually delete (otherwise only lists)
+
+Run bin/t2mv <command> --help for one command's usage.
+Projects live in ${path.relative(process.cwd(), PROJECTS) || '.'}/ (override with T2MV_PROJECTS). Everything in a project folder is private
+and gitignored, except projects/demo.`;
+
+const USAGE = {
+  doctor: 'bin/t2mv doctor\n  check node, ffmpeg, python, Chrome, Full Disk Access, the optional .venv; print fixes. Exit 1 only if a required check fails.',
+  init: 'bin/t2mv init <name>\n  create projects/<name>/ with a project.json from project.example.json',
+  status: 'bin/t2mv status <name>\n  show which pipeline artifacts exist',
+  db: 'bin/t2mv db <name>\n  Instagram export -> ig_clean.json, + iMessage -> projects/<name>/data/dms.db (plain python3; no .venv needed)',
+  research: 'bin/t2mv research <name>\n  print the Claude Code prompt for the research + lyrics workflow',
+  lyrics: 'bin/t2mv lyrics <name>\n  print the prompt for the lyric revision workflow (set song.revision_feedback first)',
+  suno: 'bin/t2mv suno <name> login|create|fetch [suno.mjs options]\n  run suno/suno.mjs (create spends credits; try --dry-run). See node suno/suno.mjs --help',
+  audio: 'bin/t2mv audio <name> [--model=NAME] [--skip-analyze]\n  fade/cut song.wav -> song_cut.wav, beats + transcript, aligned lyrics (needs .venv)',
+  timeline: 'bin/t2mv timeline <name> [--refresh-engine]\n  create video/build (package.json; npm install copies the engine in via engine/sync.mjs), write src/timeline_data.js,\n  chapters.json, placeholder chapters and a starter src/story.js (scripts/make_timeline.py), then src/project_files.js',
+  preproduction: 'bin/t2mv preproduction <name>\n  print the prompt for the pre-production workflow',
+  chapters: 'bin/t2mv chapters <name>\n  print the prompt for the chapters/review/fix workflow',
+  review: 'bin/t2mv review <name>\n  print the prompt for the standalone continuity review workflow',
+  fixes: 'bin/t2mv fixes <name> [--items=FILE]\n  print the prompt for the apply-review-fixes workflow',
+  render: 'bin/t2mv render <name> [--fresh] [--tries=N] [--workers=N] [--fps=N] [--skip-checkquotes]\n  checkquotes, render all frames (retry loop), encode, verify, share copy',
+  clean: 'bin/t2mv clean <name> [--yes]\n  list (or with --yes delete) re-creatable bulk: frames, previews, node_modules, raw audio',
+  workflow: `bin/t2mv workflow <name> <stage>\n  print the prompt for any workflow. Stages: ${Object.keys(WORKFLOWS).join(', ')}`,
+};
+
+// ---------- small helpers ----------
+const argv = process.argv.slice(2);
+const flags = {};
+const pos = [];
+for (const a of argv) {
+  if (a.startsWith('--')) { const [k, ...v] = a.slice(2).split('='); flags[k] = v.length ? v.join('=') : true; }
+  else pos.push(a);
+}
+function die(msg) { console.error(`t2mv: ${msg}`); process.exit(1); }
+function info(msg) { console.log(`\n== ${msg}`); }
+function rel(p) { return path.relative(process.cwd(), p) || '.'; }
+function expand(p) { return p && p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p; }
+function exists(p) { try { fs.accessSync(p); return true; } catch { return false; } }
+function run(cmd, args, opts = {}) {
+  console.log(`$ ${[cmd, ...args].map(a => (/[\s"'$]/.test(a) ? JSON.stringify(a) : a)).join(' ')}`);
+  const r = spawnSync(cmd, args, { stdio: 'inherit', ...opts });
+  if (r.error) die(`${cmd}: ${r.error.message}`);
+  if (r.status !== 0 && !opts.allowFail) die(`${cmd} exited with ${r.status}`);
+  return r.status;
+}
+function capture(cmd, args, opts = {}) {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', ...opts });
+  return { ok: !r.error && r.status === 0, out: (r.stdout || '').trim(), err: (r.stderr || '').trim(), status: r.status };
+}
+function py() { return exists(VENV_PY) ? VENV_PY : 'python3'; }
+function needVenv() {
+  if (!exists(VENV_PY)) die(`no venv at ${rel(VENV_PY)}. Create it:\n  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`);
+  return VENV_PY;
+}
+function probeDuration(file) {
+  const r = capture('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file]);
+  if (!r.ok) die(`ffprobe failed on ${rel(file)}: ${r.err}`);
+  return +(+r.out).toFixed(2);
+}
+
+// ---------- project ----------
+function projectPaths(name) {
+  if (!name) die('missing project name');
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(name)) die('project names may only use letters, digits, . _ - (not starting with . or -)');
+  const dir = path.join(PROJECTS, name);
+  const video = path.join(dir, 'video');
+  return {
+    name, dir, video, cfgFile: path.join(dir, 'project.json'),
+    data: path.join(dir, 'data'), research: path.join(dir, 'research'), out: path.join(dir, 'out'),
+    build: path.join(video, 'build'), lyricsMaster: path.join(dir, 'lyrics.txt'), lyrics: path.join(video, 'lyrics.txt'),
+    songWav: path.join(video, 'song.wav'), songCut: path.join(video, 'song_cut.wav'), songMeta: path.join(video, 'song.json'),
+    chaptersJson: path.join(video, 'chapters.json'), workflowArgs: path.join(dir, 'workflow_args'),
+  };
+}
+function load(name) {
+  const P = projectPaths(name);
+  let cfg;
+  if (!exists(P.cfgFile)) {
+    // A render-only project (e.g. a demo shipped with just video/) works without project.json: chapters come from video/chapters.json.
+    if (!exists(P.chaptersJson)) die(`${rel(P.cfgFile)} not found. Run: bin/t2mv init ${name}`);
+    console.warn(`note: no ${rel(P.cfgFile)}; using defaults and ${rel(P.chaptersJson)}`);
+    cfg = { name, chapters: JSON.parse(fs.readFileSync(P.chaptersJson, 'utf8')), video: { out_name: `${name}.mp4` } };
+  } else {
+    try { cfg = JSON.parse(fs.readFileSync(P.cfgFile, 'utf8')); } catch (e) { die(`${rel(P.cfgFile)}: ${e.message}`); }
+  }
+  cfg.data = cfg.data || {}; cfg.song = cfg.song || {}; cfg.video = cfg.video || {};
+  P.db = path.resolve(P.dir, expand(cfg.data.dms_db || 'data/dms.db'));
+  return { P, cfg };
+}
+function songDuration(P) {
+  if (exists(P.songMeta)) { try { return JSON.parse(fs.readFileSync(P.songMeta, 'utf8')).duration; } catch { /* fall through */ } }
+  if (exists(P.songCut)) return probeDuration(P.songCut);
+  return null;
+}
+
+// ---------- commands ----------
+function cmdDoctor() {
+  let bad = 0;
+  const row = (ok, what, detail, fix) => {
+    console.log(`${ok === true ? '  ok  ' : ok === 'warn' ? ' warn ' : ' FAIL '} ${what}${detail ? ` - ${detail}` : ''}`);
+    if (ok !== true && fix) console.log(`        fix: ${fix}`);
+    if (ok === false) bad++;
+  };
+  console.log('t2mv doctor\n');
+  const nodeMajor = +process.versions.node.split('.')[0];
+  row(nodeMajor >= 22 ? true : nodeMajor >= 20 ? 'warn' : false, 'node', process.versions.node, 'brew install node@22');
+  for (const t of ['ffmpeg', 'ffprobe']) {
+    const r = capture(t, ['-version']);
+    row(r.ok, t, r.ok ? r.out.split('\n')[0].split(' ').slice(0, 3).join(' ') : 'not on PATH', 'brew install ffmpeg');
+  }
+  const p3 = capture('python3', ['-c', 'import sys;print("%d.%d.%d"%sys.version_info[:3])']);
+  const [maj, min] = (p3.out || '0.0').split('.').map(Number);
+  row(p3.ok && (maj > 3 || min >= 10), 'python3', p3.ok ? p3.out : 'not on PATH', 'brew install python@3.13');
+  const sq = capture('sqlite3', ['-version']);
+  row(sq.ok ? true : 'warn', 'sqlite3 CLI', sq.ok ? sq.out.split(' ')[0] : 'not on PATH (agents use it to read dms.db)', 'brew install sqlite');
+  if (!exists(VENV_PY)) row('warn', '.venv', 'missing (needed for the audio stage and photo prints, not for the demo)', 'python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt  (Python 3.10-3.13; 3.14 lacks some wheels)');
+  else {
+    const mods = ['numpy', 'librosa', 'faster_whisper', 'PIL'];
+    const missing = mods.filter(m => !capture(VENV_PY, ['-c', `import ${m}`]).ok);
+    row(!missing.length ? true : 'warn', '.venv packages', missing.length ? `missing: ${missing.join(', ')} (needed for the audio stage, not for the demo)` : mods.join(', '), '.venv/bin/pip install -r requirements.txt');
+  }
+  row(exists(CHROME), 'Google Chrome', exists(CHROME) ? 'found' : CHROME, 'install Chrome, or set CHROME_PATH to its binary');
+  if (process.platform === 'darwin') {
+    const chat = path.join(os.homedir(), 'Library', 'Messages', 'chat.db');
+    let st = true, d = 'can read ~/Library/Messages/chat.db';
+    try { fs.closeSync(fs.openSync(chat, 'r')); } catch (e) {
+      if (e.code === 'ENOENT') { st = 'warn'; d = 'no chat.db (Messages not set up on this Mac?) - Instagram-only projects still work'; }
+      else { st = false; d = `cannot read chat.db (${e.code})`; }
+    }
+    row(st, 'Full Disk Access', d, 'System Settings > Privacy & Security > Full Disk Access: enable your terminal app, then restart it');
+  } else row('warn', 'macOS', `platform is ${process.platform}: iMessage import and the Metal renderer need macOS`, null);
+  row(exists(path.join(ENGINE, 'render.mjs')) || exists(path.join(ENGINE, 'README.md')), 'engine/', exists(ENGINE) ? 'present' : 'missing', 'restore engine/ from the repo');
+  row(exists(path.join(REPO, 'suno', 'suno.mjs')) ? true : 'warn', 'suno/suno.mjs', exists(path.join(REPO, 'suno', 'suno.mjs')) ? 'present' : 'missing (use scripts/suno_fetch.sh, or make the song by hand)', null);
+  if (exists(path.join(REPO, 'suno', 'package.json')))
+    row(exists(path.join(REPO, 'suno', 'node_modules')) ? true : 'warn', 'suno deps', exists(path.join(REPO, 'suno', 'node_modules')) ? 'installed' : 'not installed', '(cd suno && npm install)');
+  const cl = capture('claude', ['--version']);
+  row(cl.ok ? true : 'warn', 'Claude Code', cl.ok ? cl.out : 'not on PATH (needed for the research/lyrics/video workflows)', 'npm install -g @anthropic-ai/claude-code');
+  const df = capture('df', ['-k', REPO]);
+  const freeGB = df.ok ? +(+df.out.split('\n').pop().trim().split(/\s+/)[3] / 1048576).toFixed(1) : null;
+  if (freeGB != null) row(freeGB >= 15 ? true : 'warn', 'disk', `${freeGB} GB free (a 4-5 min render needs ~15 GB while frames exist)`, 'free space, or bin/t2mv clean <name> --yes');
+  console.log(bad ? `\n${bad} problem(s) to fix.` : '\nall required checks passed.');
+  process.exitCode = bad ? 1 : 0;
+}
+
+function cmdInit(name) {
+  const P = projectPaths(name);
+  if (exists(P.cfgFile)) die(`${rel(P.cfgFile)} already exists`);
+  for (const d of [P.dir, P.data, P.research, P.video, P.out]) fs.mkdirSync(d, { recursive: true });
+  const cfg = JSON.parse(fs.readFileSync(path.join(REPO, 'project.example.json'), 'utf8'));
+  cfg.name = name; cfg.video.out_name = `${name}.mp4`;
+  fs.writeFileSync(P.cfgFile, JSON.stringify(cfg, null, 2) + '\n');
+  console.log(`created ${rel(P.dir)}/
+  project.json   <- edit this first: me (your name exactly as your messages show it), timezone, data paths, brief, eras
+  data/ research/ video/ out/
+
+next: bin/t2mv doctor, then bin/t2mv db ${name}`);
+}
+
+function cmdStatus(name) {
+  const { P, cfg } = load(name);
+  const items = [
+    ['dms.db', P.db], ['ARC.md', path.join(P.dir, 'ARC.md')], ['lyrics.txt (Suno format)', P.lyricsMaster],
+    ['video/song.wav', P.songWav], ['video/song_cut.wav', P.songCut], ['video/lyrics.txt', P.lyrics],
+    ['video/beats.json', path.join(P.video, 'beats.json')], ['video/transcript.json', path.join(P.video, 'transcript.json')],
+    ['video/aligned.json', path.join(P.video, 'aligned.json')], ['video/build/', P.build],
+    ['build/STORYBOARD.md', path.join(P.build, 'STORYBOARD.md')],
+    [`build/out/${cfg.video.out_name || name + '.mp4'}`, path.join(P.build, 'out', cfg.video.out_name || name + '.mp4')],
+  ];
+  for (const [k, p] of items) console.log(`${exists(p) ? '  [x]' : '  [ ]'} ${k}`);
+  const dur = songDuration(P);
+  console.log(`\nme: ${cfg.me || '(unset)'} · chapters: ${(cfg.chapters || []).length} · song duration: ${dur ?? '(unknown)'}`);
+}
+
+function cmdDb(name) {
+  const { P, cfg } = load(name);
+  if (!cfg.me || cfg.me === 'Alex') console.warn('warning: project.json "me" looks like the example value; set it to your sender name');
+  fs.mkdirSync(P.data, { recursive: true });
+  const igExport = expand(cfg.data.instagram_export || '');
+  const igOut = path.join(P.data, 'ig_out');
+  const igJson = path.join(igOut, 'ig_clean.json');
+  if (igExport && exists(igExport)) {
+    info('Instagram export -> ig_clean.json');
+    run('python3', ['-I', path.join(SCRIPTS, 'ig_clean.py'), igExport, igOut, '--tz', cfg.timezone || 'UTC',
+      '--export-utc-offset', String(cfg.data.instagram_export_utc_offset ?? 0)]);
+  } else if (igExport) console.warn(`warning: instagram_export ${igExport} not found; building without Instagram`);
+  info('build dms.db');
+  const a = [path.join(SCRIPTS, 'build_dms.py'), '--out', P.db, '--me', cfg.me];
+  if (exists(igJson)) a.push('--ig', igJson);
+  for (const al of cfg.me_aliases || []) a.push('--me-alias', al);
+  if (cfg.data.imessage === false) a.push('--no-imessage');
+  else if (cfg.data.chat_db) a.push('--chat-db', expand(cfg.data.chat_db));
+  run('python3', ['-I', ...a], { env: { ...process.env, TZ: cfg.timezone || process.env.TZ } });
+  console.log(`\nok: ${rel(P.db)}  (open read-only: sqlite3 "file:${rel(P.db)}?mode=ro")
+search it: python3 scripts/dmsearch.py --db ${rel(P.db)} stats
+next: bin/t2mv research ${name}`);
+}
+
+function slicesFor(chapters, dur) {
+  const end = dur || (chapters.length ? chapters[chapters.length - 1][2] : 0);
+  if (!end) return [];
+  const n = Math.max(1, Math.round(end / 45));
+  const w = end / n;
+  return Array.from({ length: n }, (_, i) => [+Math.max(0, i * w - 4).toFixed(1), +Math.min(end, (i + 1) * w).toFixed(1)]);
+}
+
+function workflowArgs(name, stage) {
+  const { P, cfg } = load(name);
+  const dur = songDuration(P);
+  const a = {
+    project: name,
+    title: cfg.title,
+    protagonist: cfg.me,
+    displayName: cfg.display_name || cfg.me,
+    timezone: cfg.timezone,
+    audience: cfg.audience,
+    tone: cfg.tone,
+    brief: cfg.brief,
+    projectDir: P.dir,
+    researchDir: P.research,
+    videoDir: P.video,
+    buildDir: P.build,
+    python: exists(VENV_PY) ? VENV_PY : 'python3',
+    db: P.db,
+    dmsearch: path.join(SCRIPTS, 'dmsearch.py'),
+    lyricsFile: P.lyricsMaster,
+  };
+  if (stage === 'research') Object.assign(a, { eras: cfg.eras || [], extraResearch: cfg.extra_research || [], songStyle: cfg.song.style, targetLength: cfg.song.target_length, angles: cfg.song.lyric_angles || [] });
+  if (stage === 'lyrics') Object.assign(a, { songStyle: cfg.song.style, targetLength: cfg.song.target_length, feedback: cfg.song.revision_feedback || '', hooks: cfg.song.revision_hooks || [] });
+  if (stage === 'suno-browser') Object.assign(a, { songStyle: cfg.song.style, outDir: P.video });
+  if (stage === 'preproduction') Object.assign(a, { lyricSections: cfg.lyric_sections || [], looksPeople: cfg.looks_people || '', settingsPlaces: cfg.settings_places || '', duration: dur });
+  if (stage === 'chapters' || stage === 'review') Object.assign(a, { chapters: cfg.chapters || [], duration: dur, slices: cfg.review_slices || slicesFor(cfg.chapters || [], dur) });
+  if (stage === 'fixes') {
+    if (!flags.items) die('fixes needs --items=<file.json> (an array of {tag, file, findings:[{t,severity,problem,fix}], extra?})');
+    const j = JSON.parse(fs.readFileSync(path.resolve(flags.items), 'utf8'));
+    a.items = Array.isArray(j) ? j : j.items;  // accept the raw array or 4_continuity_review's whole result
+    if (!Array.isArray(a.items) || !a.items.length) die('--items file has no items');
+  }
+  if (['preproduction', 'chapters', 'review', 'fixes'].includes(stage) && !exists(P.build)) console.warn(`warning: ${rel(P.build)} does not exist yet; run bin/t2mv timeline ${name} first`);
+  if (stage === 'research' && !exists(P.db)) console.warn(`warning: ${rel(P.db)} does not exist yet; run bin/t2mv db ${name} first`);
+  return a;
+}
+
+function cmdWorkflow(name, stage) {
+  const W = WORKFLOWS[stage];
+  if (!W) die(`unknown workflow stage "${stage}". One of: ${Object.keys(WORKFLOWS).join(', ')}`);
+  const a = workflowArgs(name, stage);
+  const P = projectPaths(name);
+  fs.mkdirSync(P.workflowArgs, { recursive: true });
+  const argsFile = path.join(P.workflowArgs, `${stage}.json`);
+  fs.writeFileSync(argsFile, JSON.stringify(a, null, 2) + '\n');
+  console.log(`Workflow: workflows/${W.file} - ${W.what}
+Args saved to ${rel(argsFile)} (private; inside your project folder).
+
+Workflows run inside Claude Code (Opus-class model, started in this repo). Paste this to Claude:
+--------------------------------------------------------------------------------
+Run the workflow at workflows/${W.file} with args from ${rel(argsFile)} (pass the JSON object as the Workflow args value, not as a string).
+--------------------------------------------------------------------------------
+Or inline:
+run the workflow at workflows/${W.file} with args ${JSON.stringify(a)}
+`);
+}
+
+function cmdSuno(name, sub, rest) {
+  const { P, cfg } = load(name);
+  const suno = path.join(REPO, 'suno', 'suno.mjs');
+  if (!exists(suno)) die(`suno/suno.mjs not found. Fallback for downloading: scripts/suno_fetch.sh <share-url> ${rel(P.video)}`);
+  if (!sub) die('usage: bin/t2mv suno <name> login|create|fetch [args...]  (see suno/README.md; create spends credits, try --dry-run)');
+  const has = (k) => rest.some(r => r === `--${k}` || r.startsWith(`--${k}=`));
+  const args = [suno, sub, ...rest];
+  fs.mkdirSync(P.video, { recursive: true });
+  if (sub === 'fetch') {
+    if (!rest.some(r => /^https?:\/\/|^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(r))) {
+      if (!cfg.song.suno_url) die('pass a Suno share URL, or set song.suno_url in project.json');
+      args.push(cfg.song.suno_url);
+    }
+    if (!has('out')) args.push('--out', P.video);
+  }
+  if (sub === 'create') {
+    const master = exists(P.lyricsMaster) ? parseSongFile(P.lyricsMaster) : null;
+    if (!has('lyrics')) {
+      if (!master && !exists(P.lyrics)) die(`no lyrics: write ${rel(P.lyricsMaster)} first (bin/t2mv research ${name})`);
+      if (master) fs.writeFileSync(P.lyrics, master.lyrics);
+      args.push('--lyrics', P.lyrics);
+    }
+    if (!has('style')) {
+      const style = (master && master.style) || cfg.song.style;
+      if (!style) die('no style line: set song.style in project.json or pass --style');
+      const f = path.join(P.video, 'style.txt'); fs.writeFileSync(f, style + '\n'); args.push('--style', f);
+    }
+    if (!has('title') && ((master && master.title) || cfg.title)) args.push('--title', (master && master.title) || cfg.title);
+    if (!has('out')) args.push('--out', path.join(P.video, 'suno-takes'));
+  }
+  run('node', args, { cwd: REPO });
+  if (sub === 'create' && !rest.includes('--dry-run')) console.log(`\nlisten to the takes in ${rel(path.join(P.video, 'suno-takes'))}, share the best one on suno.com, then:\n  bin/t2mv suno ${name} fetch <share-url>`);
+  if (sub === 'fetch') console.log(`\nnext: bin/t2mv audio ${name}`);
+}
+
+function parseSongFile(file) {
+  // The lyric workflows write: "TITLE: <t>", a "STYLE ..." header + one style line, a "LYRICS ..." header + the lyrics.
+  const lines = fs.readFileSync(file, 'utf8').split('\n');
+  const t = lines.find(l => /^TITLE:/i.test(l.trim()));
+  const si = lines.findIndex(l => /^STYLE\b/i.test(l.trim()));
+  const li = lines.findIndex(l => /^LYRICS\b/i.test(l.trim()));
+  const style = si >= 0 ? (lines.slice(si + 1).find(l => l.trim()) || '').trim() : '';
+  const lyrics = (li >= 0 ? lines.slice(li + 1) : lines).join('\n').replace(/^\s+/, '');
+  return { title: t ? t.replace(/^TITLE:\s*/i, '').trim() : '', style, lyrics };
+}
+
+function cmdAudio(name) {
+  const { P, cfg } = load(name);
+  if (!exists(P.songWav)) {
+    const src = ['song.m4a', 'suno-share.mp4', 'song.mp3'].map(f => path.join(P.video, f)).find(exists);
+    if (!src) die(`${rel(P.songWav)} not found. Get the song first: bin/t2mv suno ${name} fetch <share-url>`);
+    info(`extract ${path.basename(src)} -> song.wav`);
+    run('ffmpeg', ['-v', 'error', '-y', '-i', src, '-vn', '-ar', '44100', P.songWav]);
+  }
+  if (!exists(P.lyrics)) {
+    if (!exists(P.lyricsMaster)) die(`no lyrics: write ${rel(P.lyricsMaster)} (the research/lyrics workflows do) or ${rel(P.lyrics)}`);
+    fs.writeFileSync(P.lyrics, parseSongFile(P.lyricsMaster).lyrics);
+    console.log(`wrote ${rel(P.lyrics)} from ${rel(P.lyricsMaster)} (lyrics only)`);
+  }
+  const full = probeDuration(P.songWav);
+  const end = +(cfg.song.trim_end || full).toFixed(2);
+  const fade = +(cfg.song.fade_out ?? 2.2);
+  info(`cut + fade: ${end}s (full ${full}s), ${fade}s fade-out -> song_cut.wav`);
+  run('ffmpeg', ['-v', 'error', '-y', '-i', P.songWav, '-t', String(end), '-af', `afade=t=out:st=${Math.max(0, end - fade).toFixed(2)}:d=${fade}`, '-ar', '44100', P.songCut]);
+  const dur = probeDuration(P.songCut);
+  fs.writeFileSync(P.songMeta, JSON.stringify({ duration: dur, source_duration: full, fade_out: fade }, null, 2) + '\n');
+  if (!flags['skip-analyze']) {
+    info('beats + whisper transcript (first run downloads ~1.5 GB model)');
+    run(needVenv(), [path.join(SCRIPTS, 'analyze_audio.py'), P.video, '--audio', 'song_cut.wav', '--model', String(flags.model || cfg.song.whisper_model || 'medium.en')]);
+  }
+  info('align lyrics to sung word times');
+  run(py(), [path.join(SCRIPTS, 'align_lyrics.py'), P.video, String(dur)]);
+  console.log(`\nok: duration ${dur}s. CHECK ${rel(path.join(P.video, 'aligned.json'))} by eye: whisper often squashes or skips a repeated chorus;
+fix it by copying another chorus's times with an offset. Then set "chapters" in project.json: cut on section starts,
+15-25 s each, choruses as their own chapters, last chapter ending at ${dur}.
+next: bin/t2mv timeline ${name}`);
+}
+
+// The engine is copied into each build/ by engine/sync.mjs (engine-owned files only: render.mjs, studio.html, GUIDE.md,
+// src/{core,frame,cast,props}.js, src/lab/, tools/, assets/fonts/). The build's package.json runs it on `npm install`.
+// Per-project code lives in project-owned overlays (src/cast_project.js, src/props_project.js, src/hud.js, src/story.js) that
+// sync never touches; sync also refuses to overwrite an engine copy edited inside build/ (see engine/README.md).
+function writeBuildPackage(P, name) {
+  const pkg = path.join(P.build, 'package.json');
+  if (exists(pkg)) return;
+  const eng = JSON.parse(fs.readFileSync(path.join(ENGINE, 'package.json'), 'utf8'));
+  const sync = path.relative(P.build, path.join(ENGINE, 'sync.mjs')).split(path.sep).join('/');
+  fs.mkdirSync(P.build, { recursive: true });
+  fs.writeFileSync(pkg, JSON.stringify({
+    name: `${name.toLowerCase().replace(/[^a-z0-9-]/g, '-')}-video`, private: true, type: 'module',
+    description: 'Project build folder. `npm install` also copies the shared engine in (engine/sync.mjs).',
+    scripts: { postinstall: `node ${sync} .`, sync: `node ${sync} .`, check: 'node tools/checkquotes.mjs' },
+    dependencies: eng.dependencies,
+  }, null, 2) + '\n');
+  fs.writeFileSync(path.join(P.build, '.gitignore'), ['# copied in from engine/ by engine/sync.mjs (npm install): edit them in engine/, not here',
+    '/render.mjs', '/studio.html', '/GUIDE.md', '/src/core.js', '/src/frame.js', '/src/cast.js', '/src/props.js', '/tools/', '/assets/fonts/',
+    '/src/lab/*', '!/src/lab/p_*.js', '/.engine-sync.json', '/.engine-sync-backup/', '# generated / heavy', '/src/project_files.js',
+    'node_modules/', 'out/', 'previews/', 'photos/', ''].join('\n'));
+}
+
+function syncEngine(P) {
+  const sync = path.join(ENGINE, 'sync.mjs');
+  if (!exists(sync)) die('engine/sync.mjs not found');
+  run('node', [sync, P.build]);
+}
+
+function cmdTimeline(name) {
+  const { P, cfg } = load(name);
+  const configured = exists(P.cfgFile);
+  const dur = songDuration(P);
+  if (!dur) die(`no song duration yet: run bin/t2mv audio ${name}`);
+  for (const f of ['aligned.json', 'beats.json']) if (!exists(path.join(P.video, f))) die(`${rel(path.join(P.video, f))} missing: run bin/t2mv audio ${name}`);
+  const ch = cfg.chapters || [];
+  if (!ch.length) die('project.json has no "chapters": [["c01_intro", 0, 24.8], ...]');
+  for (let i = 0; i < ch.length; i++) {
+    const [n, s, e] = ch[i];
+    if (!/^[A-Za-z0-9_]+$/.test(n) || !(e > s)) die(`bad chapter ${JSON.stringify(ch[i])}`);
+    if (i && Math.abs(ch[i - 1][2] - s) > 1e-6) console.warn(`warning: gap/overlap between ${ch[i - 1][0]} and ${n}`);
+  }
+  if (Math.abs(ch[ch.length - 1][2] - dur) > 0.05) console.warn(`warning: last chapter ends at ${ch[ch.length - 1][2]} but the song is ${dur}s`);
+  const fresh = !exists(path.join(P.build, 'render.mjs'));
+  writeBuildPackage(P, name);
+  if (!exists(path.join(P.build, 'node_modules'))) {
+    info('npm install (engine deps; postinstall copies the engine in)');
+    run('npm', [exists(path.join(P.build, 'package-lock.json')) ? 'ci' : 'install', '--no-audit', '--no-fund'], { cwd: P.build });
+  } else if (fresh || flags['refresh-engine']) {
+    info('sync engine (engine copies edited inside build/ are kept; see the sync output)'); syncEngine(P);
+  }
+  if (!exists(path.join(P.build, 'render.mjs'))) syncEngine(P);
+  if (configured) fs.writeFileSync(P.chaptersJson, JSON.stringify(ch) + '\n');
+  if (!configured && exists(path.join(P.build, 'src', 'timeline_data.js'))) {
+    console.log(`\nno project.json: keeping the existing ${rel(path.join(P.build, 'src', 'timeline_data.js'))} (render-only project).`);
+  } else {
+    info('wire timeline');
+    const a = [path.join(SCRIPTS, 'make_timeline.py'), P.video, String(dur), cfg.video.out_name || `${name}.mp4`, P.chaptersJson, '--build', P.build];
+    if (cfg.story_start_date) a.push('--start-date', cfg.story_start_date);
+    run('python3', a);
+  }
+  if (exists(P.db) && exists(path.join(P.build, 'tools', 'msgcounts.mjs')) && !exists(path.join(P.build, 'src', 'msg_data.js'))) {
+    info('per-day sent-message counts for the odometer HUD');
+    run('node', ['tools/msgcounts.mjs', `--db=${P.db}`], { cwd: P.build });
+  }
+  info('list project scripts for studio.html (tools/assets.mjs -> src/project_files.js)');
+  run('node', ['tools/assets.mjs'], { cwd: P.build });
+  console.log(`\nok. Scrub it live: open ${rel(path.join(P.build, 'studio.html'))} in Chrome (or serve the folder).
+next: bin/t2mv preproduction ${name} (its director writes the project header into STORYBOARD.md and the story dates into src/story.js)`);
+}
+
+function cmdRender(name) {
+  const { P, cfg } = load(name);
+  if (!exists(path.join(P.build, 'render.mjs'))) die(`${rel(P.build)}/render.mjs missing: run bin/t2mv timeline ${name}`);
+  const dur = songDuration(P);
+  if (!dur) die(`no song duration: run bin/t2mv audio ${name}`);
+  const fps = +(flags.fps || cfg.video.fps || 30);
+  const workers = +(flags.workers || cfg.video.workers || 4);
+  const tries = +(flags.tries || 4);
+  const outName = cfg.video.out_name || `${name}.mp4`;
+  const outFile = path.join(P.build, 'out', outName);
+  const framesDir = path.join(P.build, 'out', `frames${fps}`);
+  const chrome = exists(CHROME) ? [`--chrome=${CHROME}`] : [];
+  const B = { cwd: P.build, env: { ...process.env, T2MV_CHROME: CHROME } };
+  const chDir = path.join(P.build, 'src', 'ch');
+  if (!flags['skip-checkquotes'] && !exists(P.db)) console.warn(`warning: no ${rel(P.db)}; skipping checkquotes (receipts are NOT verified)`);
+  else if (!flags['skip-checkquotes'] && exists(path.join(P.build, 'tools', 'checkquotes.mjs')) && exists(chDir)) {
+    info('checkquotes (every on-screen receipt must be a real message)');
+    const files = fs.readdirSync(chDir).filter(f => f.endsWith('.js')).map(f => path.join('src', 'ch', f));
+    const r = capture('node', ['tools/checkquotes.mjs', `--db=${P.db}`, ...files], B);
+    const bad = (r.out + '\n' + r.err).split('\n').filter(l => l.trim() && !/^OK\b/.test(l));
+    if (bad.length) { console.log(bad.join('\n')); console.log('^ non-OK receipts. WRONGWHO on a very common word can be a false alarm; check by hand. Continuing.'); }
+    else console.log('all receipts OK');
+  }
+  if (flags.fresh && exists(framesDir)) { info(`--fresh: removing ${rel(framesDir)}`); fs.rmSync(framesDir, { recursive: true, force: true }); }
+  info(`frames 0:${dur} @ ${fps} fps, ${workers} workers (resumable; Chrome occasionally drops, so retry)`);
+  let ok = false;
+  for (let i = 1; i <= tries && !ok; i++) {
+    console.log(`attempt ${i}/${tries}`);
+    ok = run('node', ['render.mjs', `--frames=0:${dur}`, `--workers=${workers}`, `--fps=${fps}`, ...chrome], { ...B, allowFail: true }) === 0;
+  }
+  if (!ok) die(`frame rendering failed ${tries} times; re-run bin/t2mv render ${name} to resume`);
+  info('encode');
+  run('node', ['render.mjs', '--encode', `--fps=${fps}`, `--out=out/${outName}`], B);
+  info('verify');
+  const pr = capture('ffprobe', ['-v', 'error', '-show_entries', 'format=duration:stream=codec_name,width,height', '-of', 'json', outFile]);
+  if (!pr.ok) die(`ffprobe failed: ${pr.err}`);
+  const j = JSON.parse(pr.out);
+  const v = j.streams.find(s => s.width), a = j.streams.find(s => !s.width);
+  const d = +j.format.duration;
+  const problems = [];
+  if (!v || v.width !== 1080 || v.height !== 1920) problems.push(`video stream ${v ? v.width + 'x' + v.height : 'missing'} (expected 1080x1920)`);
+  if (!v || v.codec_name !== 'h264') problems.push(`video codec ${v && v.codec_name}`);
+  if (!a || a.codec_name !== 'aac') problems.push(`audio codec ${a ? a.codec_name : 'missing'}`);
+  if (Math.abs(d - dur) > 0.5) problems.push(`duration ${d.toFixed(2)}s vs song ${dur}s`);
+  console.log(`duration ${d.toFixed(2)}s · ${v && v.codec_name} ${v && v.width}x${v && v.height} · ${a && a.codec_name}`);
+  const dec = capture('ffmpeg', ['-v', 'error', '-i', outFile, '-f', 'null', '-']);
+  if (!dec.ok || dec.err) problems.push(`decode errors: ${dec.err.slice(0, 400)}`); else console.log('DECODE_OK');
+  if (problems.length) die(`verification failed:\n  ${problems.join('\n  ')}`);
+  info('share copy (smaller, faststart)');
+  fs.mkdirSync(P.out, { recursive: true });
+  const share = path.join(P.out, outName.replace(/\.mp4$/i, '') + '_share.mp4');
+  run('ffmpeg', ['-v', 'error', '-y', '-i', outFile, '-c:v', 'libx264', '-crf', String(cfg.video.share_crf || 24), '-preset', 'slow', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', share]);
+  fs.copyFileSync(outFile, path.join(P.out, outName));
+  console.log(`\nok:\n  ${rel(path.join(P.out, outName))}\n  ${rel(share)}\nKeep them private; share only with the people in the video.`);
+}
+
+function du(p) { const r = capture('du', ['-sh', p]); return r.ok ? r.out.split('\t')[0] : '?'; }
+function cmdClean(name) {
+  const { P } = load(name);
+  const targets = [path.join(P.build, 'out'), path.join(P.build, 'previews'), path.join(P.build, 'photos'), path.join(P.build, 'node_modules'),
+    P.songWav, path.join(P.video, 'suno-share.mp4')].filter(exists);
+  if (!targets.length) { console.log('nothing to clean'); return; }
+  console.log('re-creatable files (final mp4s are copied to out/ by render; song_cut.wav, timing JSON and build/src are kept):');
+  for (const t of targets) console.log(`  ${du(t).padStart(6)}  ${rel(t)}`);
+  if (!flags.yes) {
+    const keep = path.join(P.build, 'out');
+    if (targets.includes(keep) && !exists(P.out)) console.log('\nnote: build/out holds the rendered mp4; run render first (it copies the mp4 to out/).');
+    console.log('\ndry run. Re-run with --yes to delete.');
+    return;
+  }
+  for (const t of targets) fs.rmSync(t, { recursive: true, force: true });
+  console.log('deleted.');
+}
+
+// ---------- dispatch ----------
+const [cmd, name, ...rest] = pos;
+const restRaw = argv.slice(argv.indexOf(name) + 1);
+// `<command> --help` / `-h` prints that command's usage (suno passes it through to suno.mjs once a subcommand is given).
+const wantsHelp = flags.help || pos.includes('-h');
+if (wantsHelp && cmd && cmd !== 'help' && cmd !== '-h' && !(cmd === 'suno' && rest[0] && rest[0] !== '-h')) {
+  const u = USAGE[cmd] || (WORKFLOWS[cmd] && `bin/t2mv ${cmd} <name>\n  print the prompt for workflows/${WORKFLOWS[cmd].file}: ${WORKFLOWS[cmd].what}`);
+  console.log(u ? `usage: ${u}` : HELP);
+  process.exit(u ? 0 : 1);
+}
+if (cmd === 'workflow' && !rest[0]) die(`missing workflow stage. usage: ${USAGE.workflow}`);
+switch (cmd) {
+  case undefined: case 'help': case '-h': console.log(HELP); break;
+  case 'doctor': cmdDoctor(); break;
+  case 'init': cmdInit(name); break;
+  case 'status': cmdStatus(name); break;
+  case 'db': cmdDb(name); break;
+  case 'suno': cmdSuno(name, rest[0], restRaw.slice(1)); break;
+  case 'audio': cmdAudio(name); break;
+  case 'timeline': cmdTimeline(name); break;
+  case 'render': cmdRender(name); break;
+  case 'clean': cmdClean(name); break;
+  case 'workflow': cmdWorkflow(name, rest[0]); break;
+  default:
+    if (WORKFLOWS[cmd]) cmdWorkflow(name, cmd);
+    else die(`unknown command "${cmd}". Try bin/t2mv help`);
+}
